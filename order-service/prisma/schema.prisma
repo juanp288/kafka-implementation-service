@@ -8,11 +8,15 @@ datasource db {
 }
 
 model Order {
-  id        String   @id @default(uuid())
-  eventName String
-  seatCount Int
-  status    String   @default("PENDING")
-  sagaStep  String?
+  id            String   @id @default(uuid())
+  eventName     String
+  seatCount     Int
+  status        String   @default("PENDING")
+  sagaStep      String?
+  // Viaja en cada evento de la SAGA (RESERVE_SEATS, SEATS_RESERVED,
+  // RESERVE_SEATS_REJECTED, RELEASE_SEATS) para poder filtrar logs de
+  // ambos servicios por un único ID — base para tracing tipo OpenTelemetry.
+  correlationId String
   createdAt DateTime @default(now())
 }
 

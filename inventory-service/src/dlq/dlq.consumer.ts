@@ -34,14 +34,17 @@ export class DlqConsumer {
     const headers = context.getMessage().headers ?? {};
     const error = headers['x-error']?.toString() ?? 'unknown';
     const retryCount = Number(headers['x-retry-count']?.toString() ?? '0');
-    const eventId = (payload as { eventId?: string }).eventId;
+    const { eventId, correlationId } = payload as {
+      eventId?: string;
+      correlationId?: string;
+    };
 
     await this.prisma.deadLetter.create({
       data: { topic: originalTopic, eventId, payload, error, retryCount },
     });
 
     this.logger.error(
-      `[DLQ] 💀 Mensaje muerto persistido — topic=${originalTopic} eventId=${eventId ?? 'n/a'} retries=${retryCount}: ${error}`,
+      `[DLQ][CID:${correlationId ?? 'n/a'}] 💀 Mensaje muerto persistido — topic=${originalTopic} eventId=${eventId ?? 'n/a'} retries=${retryCount}: ${error}`,
     );
   }
 }

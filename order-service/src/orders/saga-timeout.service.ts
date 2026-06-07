@@ -32,11 +32,11 @@ export class SagaTimeoutService {
     });
 
     for (const order of staleOrders) {
-      await this.cancel(order.id);
+      await this.cancel(order.id, order.correlationId);
     }
   }
 
-  private async cancel(orderId: string) {
+  private async cancel(orderId: string, correlationId: string) {
     const cancelled = await this.prisma.$transaction(async (tx) => {
       // updateMany con guarda de estado: si SEATS_RESERVED llegó justo entre
       // el findMany y este punto, count será 0 y no compensamos una orden
@@ -53,6 +53,7 @@ export class SagaTimeoutService {
       const payload: ReleaseSeatsCommand = {
         eventId: `${orderId}-timeout-release`,
         orderId,
+        correlationId,
       };
       await tx.outbox.create({
         data: { topic: TOPICS.RELEASE_SEATS, payload: { ...payload } },
@@ -63,7 +64,7 @@ export class SagaTimeoutService {
 
     if (cancelled) {
       this.logger.warn(
-        `[SAGA] ⏱️  Order ${orderId} sin ${TOPICS.SEATS_RESERVED} tras ${this.timeoutMinutes}min → cancelada, Outbox: ${TOPICS.RELEASE_SEATS}`,
+        `[SAGA][CID:${correlationId}] ⏱️  Order ${orderId} sin ${TOPICS.SEATS_RESERVED} tras ${this.timeoutMinutes}min → cancelada, Outbox: ${TOPICS.RELEASE_SEATS}`,
       );
     }
   }

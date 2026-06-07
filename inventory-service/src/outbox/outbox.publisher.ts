@@ -34,11 +34,14 @@ export class OutboxPublisher implements OnModuleInit {
           where: { id: event.id },
           data: { publishedAt: new Date() },
         });
-        this.logger.log(`[OUTBOX] Publicado: ${event.topic} (${event.id})`);
-      } catch (e) {
-        this.logger.error(
-          `[OUTBOX] Error publicando ${event.id}: ${e.message}`,
+        const correlationId =
+          (event.payload as { correlationId?: string }).correlationId ?? 'n/a';
+        this.logger.log(
+          `[OUTBOX][CID:${correlationId}] Publicado: ${event.topic} (${event.id})`,
         );
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        this.logger.error(`[OUTBOX] Error publicando ${event.id}: ${message}`);
       }
     }
   }

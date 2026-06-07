@@ -40,13 +40,15 @@ export class DlqService {
   ) {
     const headers = this.readHeaders(context);
     const retryCount = Number(headers[RETRY_COUNT_HEADER] ?? '0');
+    const correlationId =
+      (payload as { correlationId?: string }).correlationId ?? 'n/a';
 
     if (retryCount < MAX_RETRIES) {
       const nextRetryCount = retryCount + 1;
       const backoffMs = nextRetryCount * BACKOFF_BASE_MS;
 
       this.logger.warn(
-        `[DLQ] ${topic} → fallo (${error.message}). Reintento ${nextRetryCount}/${MAX_RETRIES} en ${backoffMs}ms`,
+        `[DLQ][CID:${correlationId}] ${topic} → fallo (${error.message}). Reintento ${nextRetryCount}/${MAX_RETRIES} en ${backoffMs}ms`,
       );
 
       await this.sleep(backoffMs);
@@ -59,7 +61,7 @@ export class DlqService {
 
     const target = dlqTopic(topic);
     this.logger.error(
-      `[DLQ] ${topic} → ${MAX_RETRIES} reintentos agotados. Enviando a ${target}: ${error.message}`,
+      `[DLQ][CID:${correlationId}] ${topic} → ${MAX_RETRIES} reintentos agotados. Enviando a ${target}: ${error.message}`,
     );
     this.kafka.emit(target, {
       value: payload,

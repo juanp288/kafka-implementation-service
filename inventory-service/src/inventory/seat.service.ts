@@ -11,7 +11,7 @@ export class SeatService {
   constructor(private readonly prisma: PrismaService) {}
 
   async reserveSeats(payload: ReserveSeatsCommand) {
-    const { eventId, orderId, eventName, seatCount } = payload;
+    const { eventId, orderId, correlationId, eventName, seatCount } = payload;
 
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -32,11 +32,11 @@ export class SeatService {
           await tx.outbox.create({
             data: {
               topic: TOPICS.RESERVE_SEATS_REJECTED,
-              payload: { orderId, reason: 'NOT_ENOUGH_SEATS' },
+              payload: { orderId, correlationId, reason: 'NOT_ENOUGH_SEATS' },
             },
           });
           this.logger.warn(
-            `[INVENTORY] Asientos insuficientes para order ${orderId} (pidió ${seatCount}, hay ${available.length}) → Outbox: ${TOPICS.RESERVE_SEATS_REJECTED}`,
+            `[INVENTORY][CID:${correlationId}] Asientos insuficientes para order ${orderId} (pidió ${seatCount}, hay ${available.length}) → Outbox: ${TOPICS.RESERVE_SEATS_REJECTED}`,
           );
           return;
         }
@@ -49,11 +49,14 @@ export class SeatService {
         // SEATS_RESERVED va al Outbox dentro de la misma transacción:
         // la reserva de asientos y el evento son atómicos.
         await tx.outbox.create({
-          data: { topic: TOPICS.SEATS_RESERVED, payload: { orderId } },
+          data: {
+            topic: TOPICS.SEATS_RESERVED,
+            payload: { orderId, correlationId },
+          },
         });
 
         this.logger.log(
-          `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → Outbox: ${TOPICS.SEATS_RESERVED}`,
+          `[INVENTORY][CID:${correlationId}] ${seatCount} asientos reservados para order ${orderId} → Outbox: ${TOPICS.SEATS_RESERVED}`,
         );
       });
     } catch (e) {
@@ -61,7 +64,9 @@ export class SeatService {
         e instanceof Prisma.PrismaClientKnownRequestError &&
         e.code === 'P2002'
       ) {
-        this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
+        this.logger.warn(
+          `[INVENTORY][CID:${correlationId}] Evento duplicado ignorado: ${eventId}`,
+        );
         return;
       }
       throw e;
@@ -69,7 +74,7 @@ export class SeatService {
   }
 
   async releaseSeats(payload: ReleaseSeatsCommand) {
-    const { eventId, orderId } = payload;
+    const { eventId, orderId, correlationId } = payload;
 
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -86,12 +91,16 @@ export class SeatService {
         e instanceof Prisma.PrismaClientKnownRequestError &&
         e.code === 'P2002'
       ) {
-        this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
+        this.logger.warn(
+          `[INVENTORY][CID:${correlationId}] Evento duplicado ignorado: ${eventId}`,
+        );
         return;
       }
       throw e;
     }
 
-    this.logger.log(`[INVENTORY] ↩️  Asientos liberados para order ${orderId}`);
+    this.logger.log(
+      `[INVENTORY][CID:${correlationId}] ↩️  Asientos liberados para order ${orderId}`,
+    );
   }
 }
