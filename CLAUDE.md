@@ -4,102 +4,71 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-This repo implements a **ticket-purchase SAGA** using the orchestration pattern across two NestJS microservices communicating via Kafka. No code exists yet — the README and SVG diagrams define the architecture to build.
+SAGA orchestration pattern implemented over Kafka with two NestJS microservices. The business operation is ticket purchasing: reserve seats → process payment → confirm or compensate (release seats on payment failure).
 
-Business operation: `POST /orders` triggers a multi-step saga: reserve seats → process payment → confirm or compensate (release seats on payment failure).
+Both services run as NestJS **hybrid apps** (HTTP + Kafka consumer simultaneously). The orchestrator is `order-service`; the participant is `inventory-service`.
 
-## Planned folder structure
-
-```
-ticket-saga/
-├── docker-compose.yml
-├── orders-service/        # Orchestrator + payment mock
-│   ├── prisma/schema.prisma
-│   └── src/
-│       ├── orders/
-│       │   ├── orders.controller.ts   # POST /orders entry point
-│       │   ├── saga.orchestrator.ts   # coordinates saga steps
-│       │   └── payment.mock.ts        # random 50% failure
-│       └── kafka/kafka.module.ts
-└── inventory-service/     # Saga participant
-    ├── prisma/schema.prisma
-    └── src/
-        ├── inventory/
-        │   ├── inventory.consumer.ts  # listens for RESERVE_SEATS / RELEASE_SEATS
-        │   └── seat.service.ts        # seat logic + idempotency
-        └── kafka/kafka.module.ts
-```
-
-## Infrastructure
-
-Start everything with:
-```bash
-docker compose up -d
-```
-
-Services: Kafka on `9092`, Zookeeper on `2181`, `postgres-orders` on `5432` (db: `orders`), `postgres-inventory` on `5433` (db: `inventory`). Password for both: `postgres`.
-
-## NestJS service commands (once created)
+## Commands
 
 ```bash
-# Install deps
-npm install
+# Start everything (infra + both services)
+docker compose up --build
 
-# Run in dev
-npm run start:dev
+# Local dev (infra only in Docker, services outside)
+docker compose up zookeeper kafka postgres -d
+cd order-service && npm run start:dev      # port 3001
+cd inventory-service && npm run start:dev  # port 3002
 
 # Build
 npm run build
 
 # Tests
-npm run test              # unit
-npm run test:e2e          # e2e
-npm run test -- --testPathPattern=saga  # single file/pattern
-
-# Prisma
-npx prisma migrate dev
-npx prisma generate
-npx prisma studio
+npm run test
+npm run test:e2e
 ```
 
-## SAGA design constraints
+## Infrastructure
 
-**Ordering rule:** reserve seats before charging. Releasing seats (compensation) is trivial; reversing a charge is not. Always put the easiest-to-compensate step first.
+Single Postgres (`ticketsaga` DB) with two schemas — no separate DB per service.
 
-**Kafka topics:**
-- `RESERVE_SEATS` — orders-service → inventory-service
-- `SEATS_RESERVED` — inventory-service → orders-service
-- `RELEASE_SEATS` — orders-service → inventory-service (compensation)
+| Container | Port | Notes |
+|---|---|---|
+| Kafka | 9093 (host) / 9092 (internal) | Two listeners configured |
+| Postgres | 5432 | DB: `ticketsaga`, schemas: `orders`, `inventory` |
+| order-service | 3001 | |
+| inventory-service | 3002 | |
 
-**Idempotency:** `inventory-service` uses a `ProcessedEvent` table. Every incoming Kafka event inserts `eventId` as the PK inside the same DB transaction as the seat change. Duplicate events are silently skipped.
+Schema sync: `prisma db push` runs on container start (Dockerfile CMD). No migrations directory — use `prisma migrate dev` if switching to a migration-based workflow.
 
-**Order states:** `PENDING` → `CONFIRMED` | `FAILED`
+## Kafka topics
 
-## Data models
+| Topic | Producer → Consumer | Purpose |
+|---|---|---|
+| `RESERVE_SEATS` | order → inventory | Command: reserve N seats |
+| `SEATS_RESERVED` | inventory → order | Confirmation |
+| `RELEASE_SEATS` | order → inventory | Compensation: undo reservation |
 
-`orders-service`:
-```prisma
-model Order {
-  id        String   @id @default(uuid())
-  eventName String
-  seatCount Int
-  status    String   @default("PENDING")
-  sagaStep  String?
-  createdAt DateTime @default(now())
-}
-```
+All events carry an `eventId` assigned by the producer for idempotency.
 
-`inventory-service`:
-```prisma
-model Seat {
-  id        Int     @id @default(autoincrement())
-  eventName String
-  reserved  Boolean @default(false)
-  orderId   String?
-}
+## Idempotency pattern
 
-model ProcessedEvent {
-  eventId     String   @id
-  processedAt DateTime @default(now())
-}
-```
+`inventory-service` uses `ProcessedEvent` table. On every incoming command, `seat.service.ts` opens a `$transaction` that first inserts the `eventId` (PK), then does the business logic. A duplicate `eventId` throws `P2002`, rolling back the entire transaction — the event is silently skipped.
+
+## SAGA design rule
+
+Seats are reserved **before** charging. Releasing a seat is trivial (one UPDATE); reversing a charge requires third-party coordination. Always put the easiest-to-compensate step first.
+
+## Order states
+
+`PENDING` → `CONFIRMED` | `FAILED`
+
+`sagaStep` tracks position: `RESERVING_SEATS` → `COMPLETED` (success) or `COMPENSATING` (failure, after emitting `RELEASE_SEATS`).
+
+## Key files
+
+- Orchestration logic: `order-service/src/orders/saga.orchestrator.ts`
+- Seat reservation + idempotency: `inventory-service/src/inventory/seat.service.ts`
+- Kafka producer config: `*/src/kafka/kafka.module.ts`
+- Hybrid app setup: `*/src/main.ts`
+
+For component-level documentation of each service see `order-service/CONTEXT.md` and `inventory-service/CONTEXT.md`.

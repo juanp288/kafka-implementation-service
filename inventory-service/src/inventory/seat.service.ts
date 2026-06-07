@@ -64,13 +64,18 @@ export class SeatService implements OnModuleInit {
         });
       });
     } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
         // El evento ya fue procesado antes (eventId duplicado) → ignorar.
         this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
         return;
       }
       if (e.message === 'NOT_ENOUGH_SEATS') {
-        this.logger.warn(`[INVENTORY] Asientos insuficientes para order ${orderId}`);
+        this.logger.warn(
+          `[INVENTORY] Asientos insuficientes para order ${orderId}`,
+        );
         return;
       }
       throw e;
@@ -97,7 +102,10 @@ export class SeatService implements OnModuleInit {
         });
       });
     } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
         this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
         return;
       }
