@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   zookeeper:
@@ -11,7 +11,7 @@ services:
     image: confluentinc/cp-kafka:7.5.0
     depends_on: [zookeeper]
     ports:
-      - '9093:9093'
+      - "9093:9093"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -19,12 +19,12 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
   postgres:
     image: postgres:16
     ports:
-      - '5432:5432'
+      - "5432:5432"
     environment:
       POSTGRES_DB: ticketsaga
       POSTGRES_USER: postgres
@@ -35,7 +35,7 @@ services:
   order-service:
     build: ./order-service
     ports:
-      - '3001:3001'
+      - "3001:3001"
     depends_on:
       - kafka
       - postgres
@@ -47,7 +47,7 @@ services:
   inventory-service:
     build: ./inventory-service
     ports:
-      - '3002:3002'
+      - "3002:3002"
     depends_on:
       - kafka
       - postgres
@@ -55,6 +55,15 @@ services:
       PORT: 3002
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ticketsaga?schema=inventory
       KAFKA_BROKERS: kafka:9092
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8080:8080"
+    depends_on: [kafka]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
 
 volumes:
   postgres_data:
