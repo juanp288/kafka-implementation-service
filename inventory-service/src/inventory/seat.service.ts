@@ -1,27 +1,15 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ClientKafka } from '@nestjs/microservices';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  ReleaseSeatsCommand,
-  ReserveSeatsCommand,
-  SeatsReservedEvent,
-} from './events';
+import { ReleaseSeatsCommand, ReserveSeatsCommand } from './events';
 import { NotEnoughSeatsException } from './exceptions/not-enough-seats.exception';
 
 @Injectable()
-export class SeatService implements OnModuleInit {
+export class SeatService {
   private readonly logger = new Logger(SeatService.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    @Inject('KAFKA_CLIENT') private readonly kafka: ClientKafka,
-  ) {}
-
-  async onModuleInit() {
-    await this.kafka.connect();
-  }
+  constructor(private readonly prisma: PrismaService) {}
 
   async reserveSeats(payload: ReserveSeatsCommand) {
     const { eventId, orderId, eventName, seatCount } = payload;
@@ -38,7 +26,6 @@ export class SeatService implements OnModuleInit {
         });
 
         if (available.length < seatCount) {
-          // Lanzamos para revertir la transacción y no emitir SEATS_RESERVED
           throw new NotEnoughSeatsException(orderId);
         }
 
@@ -46,13 +33,18 @@ export class SeatService implements OnModuleInit {
           where: { id: { in: available.map((s) => s.id) } },
           data: { reserved: true, orderId },
         });
+
+        // SEATS_RESERVED va al Outbox dentro de la misma transacción:
+        // la reserva de asientos y el evento son atómicos.
+        await tx.outbox.create({
+          data: { topic: TOPICS.SEATS_RESERVED, payload: { orderId } },
+        });
       });
     } catch (e) {
       if (
         e instanceof Prisma.PrismaClientKnownRequestError &&
         e.code === 'P2002'
       ) {
-        // El evento ya fue procesado antes (eventId duplicado) → ignorar.
         this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
         return;
       }
@@ -64,11 +56,8 @@ export class SeatService implements OnModuleInit {
     }
 
     this.logger.log(
-      `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → emitiendo ${TOPICS.SEATS_RESERVED}`,
+      `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → Outbox: ${TOPICS.SEATS_RESERVED}`,
     );
-
-    const event: SeatsReservedEvent = { orderId };
-    this.kafka.emit(TOPICS.SEATS_RESERVED, event);
   }
 
   async releaseSeats(payload: ReleaseSeatsCommand) {
@@ -76,8 +65,7 @@ export class SeatService implements OnModuleInit {
 
     try {
       await this.prisma.$transaction(async (tx) => {
-        // Mismo patrón de idempotencia: si RELEASE_SEATS llega dos veces,
-        // solo la primera ejecución libera los asientos.
+        // Mismo patrón de idempotencia.
         await tx.processedEvent.create({ data: { eventId } });
 
         await tx.seat.updateMany({

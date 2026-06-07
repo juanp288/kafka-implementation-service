@@ -1,5 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ClientKafka } from '@nestjs/microservices';
+import { Injectable, Logger } from '@nestjs/common';
 import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -7,41 +6,45 @@ import { ReleaseSeatsCommand, SeatsReservedEvent } from './events';
 import { PaymentMock } from './payment.mock';
 
 @Injectable()
-export class SagaOrchestrator implements OnModuleInit {
+export class SagaOrchestrator {
   private readonly logger = new Logger(SagaOrchestrator.name);
 
   constructor(
-    @Inject('KAFKA_CLIENT') private readonly kafka: ClientKafka,
     private readonly prisma: PrismaService,
     private readonly payment: PaymentMock,
   ) {}
 
-  async onModuleInit() {
-    await this.kafka.connect();
-  }
-
   async startSaga(dto: CreateOrderDto) {
-    const order = await this.prisma.order.create({
-      data: {
-        eventName: dto.eventName,
-        seatCount: dto.seatCount,
-        sagaStep: 'RESERVING_SEATS',
-      },
+    // Transacción atómica: la orden y el evento de Outbox se crean juntos.
+    // Si el proceso cae después de este punto, OutboxPublisher re-emitirá
+    // RESERVE_SEATS en el siguiente ciclo de polling.
+    const order = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          eventName: dto.eventName,
+          seatCount: dto.seatCount,
+          sagaStep: 'RESERVING_SEATS',
+        },
+      });
+
+      await tx.outbox.create({
+        data: {
+          topic: TOPICS.RESERVE_SEATS,
+          payload: {
+            eventId: created.id,
+            orderId: created.id,
+            eventName: created.eventName,
+            seatCount: created.seatCount,
+          },
+        },
+      });
+
+      return created;
     });
 
     this.logger.log(
-      `[SAGA] Order ${order.id} created → emitiendo ${TOPICS.RESERVE_SEATS}`,
+      `[SAGA] Order ${order.id} created → Outbox: ${TOPICS.RESERVE_SEATS}`,
     );
-
-    // El eventId lo asigna el productor. El consumidor lo usa para garantizar
-    // idempotencia: si recibe el mismo evento dos veces, solo lo procesa una vez.
-    this.kafka.emit(TOPICS.RESERVE_SEATS, {
-      eventId: order.id, // orderId como eventId: un order → un único RESERVE_SEATS
-      orderId: order.id,
-      eventName: order.eventName,
-      seatCount: order.seatCount,
-    });
-
     return { orderId: order.id, status: order.status };
   }
 
@@ -61,24 +64,26 @@ export class SagaOrchestrator implements OnModuleInit {
       return;
     }
 
-    // Compensación: el pago falló, hay que deshacer la reserva de asientos.
-    // Primero marcamos la orden como FAILED y luego emitimos el comando de rollback.
-    // El orden importa: si el servicio cae entre estos dos pasos, la orden queda
-    // en FAILED pero los asientos reservados — un estado inconsistente aceptable
-    // porque RELEASE_SEATS puede re-emitirse manualmente o con un job de limpieza.
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: 'FAILED', sagaStep: 'COMPENSATING' },
+    // Compensación: el pago falló. La orden pasa a FAILED y el evento
+    // RELEASE_SEATS va al Outbox en la misma transacción — si el proceso
+    // cae entre los dos, el estado queda consistente.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: 'FAILED', sagaStep: 'COMPENSATING' },
+      });
+
+      const payload: ReleaseSeatsCommand = {
+        eventId: `${orderId}-release`,
+        orderId,
+      };
+      await tx.outbox.create({
+        data: { topic: TOPICS.RELEASE_SEATS, payload: { ...payload } },
+      });
     });
 
     this.logger.log(
-      `[SAGA] ❌ Pago fallido para order ${orderId} → emitiendo ${TOPICS.RELEASE_SEATS}`,
+      `[SAGA] ❌ Pago fallido para order ${orderId} → Outbox: ${TOPICS.RELEASE_SEATS}`,
     );
-
-    const payload: ReleaseSeatsCommand = {
-      eventId: `${orderId}-release`, // distingue este evento del RESERVE_SEATS del mismo orderId
-      orderId,
-    };
-    this.kafka.emit(TOPICS.RELEASE_SEATS, payload);
   }
 }

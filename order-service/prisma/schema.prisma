@@ -15,3 +15,11 @@ model Order {
   sagaStep  String?
   createdAt DateTime @default(now())
 }
+
+model Outbox {
+  id          String    @id @default(uuid())
+  topic       String
+  payload     Json
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
