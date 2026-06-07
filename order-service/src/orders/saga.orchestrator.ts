@@ -44,18 +44,40 @@ export class SagaOrchestrator implements OnModuleInit {
   }
 
   async onSeatsReserved(payload: { orderId: string }) {
+    const { orderId } = payload;
     this.logger.log(
-      `[SAGA] SEATS_RESERVED recibido para order ${payload.orderId} → procesando pago`,
+      `[SAGA] SEATS_RESERVED recibido para order ${orderId} → procesando pago`,
     );
 
     const paid = this.payment.processPayment();
 
     if (paid) {
       await this.prisma.order.update({
-        where: { id: payload.orderId },
+        where: { id: orderId },
         data: { status: 'CONFIRMED', sagaStep: 'COMPLETED' },
       });
-      this.logger.log(`[SAGA] ✅ Order ${payload.orderId} → CONFIRMED`);
+      this.logger.log(`[SAGA] ✅ Order ${orderId} → CONFIRMED`);
+      return;
     }
+
+    // Compensación: el pago falló, hay que deshacer la reserva de asientos.
+    // Primero marcamos la orden como FAILED y luego emitimos el comando de rollback.
+    // El orden importa: si el servicio cae entre estos dos pasos, la orden queda
+    // en FAILED pero los asientos reservados — un estado inconsistente aceptable
+    // porque RELEASE_SEATS puede re-emitirse manualmente o con un job de limpieza.
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: { status: 'FAILED', sagaStep: 'COMPENSATING' },
+    });
+
+    this.logger.log(
+      `[SAGA] ❌ Pago fallido para order ${orderId} → emitiendo RELEASE_SEATS`,
+    );
+
+    // El eventId distingue este evento del RESERVE_SEATS del mismo orderId.
+    this.kafka.emit('RELEASE_SEATS', {
+      eventId: `${orderId}-release`,
+      orderId,
+    });
   }
 }

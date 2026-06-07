@@ -10,6 +10,11 @@ interface ReserveSeatsPayload {
   seatCount: number;
 }
 
+interface ReleaseSeatsPayload {
+  eventId: string;
+  orderId: string;
+}
+
 @Injectable()
 export class SeatService implements OnModuleInit {
   private readonly logger = new Logger(SeatService.name);
@@ -59,18 +64,13 @@ export class SeatService implements OnModuleInit {
         });
       });
     } catch (e) {
-      if (
-        e instanceof Prisma.PrismaClientKnownRequestError &&
-        e.code === 'P2002'
-      ) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         // El evento ya fue procesado antes (eventId duplicado) → ignorar.
         this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
         return;
       }
       if (e.message === 'NOT_ENOUGH_SEATS') {
-        this.logger.warn(
-          `[INVENTORY] Asientos insuficientes para order ${orderId}`,
-        );
+        this.logger.warn(`[INVENTORY] Asientos insuficientes para order ${orderId}`);
         return;
       }
       throw e;
@@ -80,5 +80,30 @@ export class SeatService implements OnModuleInit {
       `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → emitiendo SEATS_RESERVED`,
     );
     this.kafka.emit('SEATS_RESERVED', { orderId });
+  }
+
+  async releaseSeats(payload: ReleaseSeatsPayload) {
+    const { eventId, orderId } = payload;
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // Mismo patrón de idempotencia: si RELEASE_SEATS llega dos veces,
+        // solo la primera ejecución libera los asientos.
+        await tx.processedEvent.create({ data: { eventId } });
+
+        await tx.seat.updateMany({
+          where: { orderId },
+          data: { reserved: false, orderId: null },
+        });
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
+        return;
+      }
+      throw e;
+    }
+
+    this.logger.log(`[INVENTORY] ↩️  Asientos liberados para order ${orderId}`);
   }
 }

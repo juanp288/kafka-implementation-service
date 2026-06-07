@@ -18,4 +18,12 @@ export class InventoryConsumer {
   ) {
     await this.seatService.reserveSeats(data);
   }
+
+  // Compensación: el pago falló en order-service, hay que deshacer la reserva.
+  @EventPattern('RELEASE_SEATS')
+  async handleReleaseSeats(
+    @Payload() data: { eventId: string; orderId: string },
+  ) {
+    await this.seatService.releaseSeats(data);
+  }
 }
