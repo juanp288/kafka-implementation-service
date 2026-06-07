@@ -7,7 +7,7 @@ import {
 } from '@nestjs/microservices';
 import { DlqService } from '../dlq/dlq.service';
 import { TOPICS } from '../kafka/topics';
-import { SeatsReservedEvent } from './events';
+import { SeatsReservationRejectedEvent, SeatsReservedEvent } from './events';
 import { SagaOrchestrator } from './saga.orchestrator';
 
 @Controller()
@@ -24,6 +24,16 @@ export class OrdersConsumer {
   ) {
     await this.dlq.withRetry(TOPICS.SEATS_RESERVED, data, context, () =>
       this.saga.onSeatsReserved(data),
+    );
+  }
+
+  @EventPattern(TOPICS.RESERVE_SEATS_REJECTED)
+  async handleReservationRejected(
+    @Payload() data: SeatsReservationRejectedEvent,
+    @Ctx() context: KafkaContext,
+  ) {
+    await this.dlq.withRetry(TOPICS.RESERVE_SEATS_REJECTED, data, context, () =>
+      this.saga.onReservationRejected(data),
     );
   }
 }

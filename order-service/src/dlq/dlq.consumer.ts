@@ -24,6 +24,14 @@ export class DlqConsumer {
     return this.persist(TOPICS.SEATS_RESERVED, data, context);
   }
 
+  @EventPattern(dlqTopic(TOPICS.RESERVE_SEATS_REJECTED))
+  handleReservationRejectedDlq(
+    @Payload() data: object,
+    @Ctx() context: KafkaContext,
+  ) {
+    return this.persist(TOPICS.RESERVE_SEATS_REJECTED, data, context);
+  }
+
   private async persist(
     originalTopic: string,
     payload: object,

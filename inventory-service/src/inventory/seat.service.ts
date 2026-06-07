@@ -3,7 +3,6 @@ import { Prisma } from '@prisma/client';
 import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReleaseSeatsCommand, ReserveSeatsCommand } from './events';
-import { NotEnoughSeatsException } from './exceptions/not-enough-seats.exception';
 
 @Injectable()
 export class SeatService {
@@ -26,7 +25,20 @@ export class SeatService {
         });
 
         if (available.length < seatCount) {
-          throw new NotEnoughSeatsException(orderId);
+          // Rechazo de negocio, no un fallo técnico: lo sabemos al instante,
+          // así que avisamos a order-service para que compense de inmediato
+          // en vez de dejar la orden colgada hasta el timeout de la SAGA.
+          // El eventId queda registrado igual — es un evento "procesado".
+          await tx.outbox.create({
+            data: {
+              topic: TOPICS.RESERVE_SEATS_REJECTED,
+              payload: { orderId, reason: 'NOT_ENOUGH_SEATS' },
+            },
+          });
+          this.logger.warn(
+            `[INVENTORY] Asientos insuficientes para order ${orderId} (pidió ${seatCount}, hay ${available.length}) → Outbox: ${TOPICS.RESERVE_SEATS_REJECTED}`,
+          );
+          return;
         }
 
         await tx.seat.updateMany({
@@ -39,6 +51,10 @@ export class SeatService {
         await tx.outbox.create({
           data: { topic: TOPICS.SEATS_RESERVED, payload: { orderId } },
         });
+
+        this.logger.log(
+          `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → Outbox: ${TOPICS.SEATS_RESERVED}`,
+        );
       });
     } catch (e) {
       if (
@@ -48,16 +64,8 @@ export class SeatService {
         this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
         return;
       }
-      if (e instanceof NotEnoughSeatsException) {
-        this.logger.warn(`[INVENTORY] ${e.message}`);
-        return;
-      }
       throw e;
     }
-
-    this.logger.log(
-      `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → Outbox: ${TOPICS.SEATS_RESERVED}`,
-    );
   }
 
   async releaseSeats(payload: ReleaseSeatsCommand) {

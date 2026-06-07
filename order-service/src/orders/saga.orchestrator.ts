@@ -2,7 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto } from './dto/create-order.dto';
-import { ReleaseSeatsCommand, SeatsReservedEvent } from './events';
+import {
+  ReleaseSeatsCommand,
+  SeatsReservationRejectedEvent,
+  SeatsReservedEvent,
+} from './events';
 import { PaymentMock } from './payment.mock';
 
 @Injectable()
@@ -84,6 +88,31 @@ export class SagaOrchestrator {
 
     this.logger.log(
       `[SAGA] ❌ Pago fallido para order ${orderId} → Outbox: ${TOPICS.RELEASE_SEATS}`,
+    );
+  }
+
+  async onReservationRejected({
+    orderId,
+    reason,
+  }: SeatsReservationRejectedEvent) {
+    // updateMany con guarda de estado: evita carrera con SagaTimeoutService
+    // si ambos intentan transicionar la misma orden al mismo tiempo.
+    const { count } = await this.prisma.order.updateMany({
+      where: { id: orderId, status: 'PENDING', sagaStep: 'RESERVING_SEATS' },
+      data: { status: 'FAILED', sagaStep: 'CANCELLED' },
+    });
+
+    if (count === 0) {
+      this.logger.warn(
+        `[SAGA] ${TOPICS.RESERVE_SEATS_REJECTED} para order ${orderId} ignorado (la orden ya no está en RESERVING_SEATS)`,
+      );
+      return;
+    }
+
+    // Sin compensación: nunca se llegó a reservar nada, así que no hay
+    // nada que liberar — emitir RELEASE_SEATS aquí sería semánticamente vacío.
+    this.logger.warn(
+      `[SAGA] ❌ Reserva rechazada para order ${orderId} (${reason}) → Order CANCELLED (sin compensación)`,
     );
   }
 }
