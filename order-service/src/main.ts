@@ -1,3 +1,4 @@
+import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { AppModule } from './app.module';
@@ -5,7 +6,12 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // order-service también escucha Kafka para recibir SEATS_RESERVED
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
+
+  // Necesario para que OnApplicationShutdown se dispare con SIGTERM
+  app.enableShutdownHooks();
+
+  // order-service escucha Kafka para recibir SEATS_RESERVED
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.KAFKA,
     options: {

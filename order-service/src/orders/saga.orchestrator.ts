@@ -1,7 +1,9 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ClientKafka } from '@nestjs/microservices';
+import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { ReleaseSeatsCommand, SeatsReservedEvent } from './events';
 import { PaymentMock } from './payment.mock';
 
 @Injectable()
@@ -28,12 +30,12 @@ export class SagaOrchestrator implements OnModuleInit {
     });
 
     this.logger.log(
-      `[SAGA] Order ${order.id} created → emitiendo RESERVE_SEATS`,
+      `[SAGA] Order ${order.id} created → emitiendo ${TOPICS.RESERVE_SEATS}`,
     );
 
     // El eventId lo asigna el productor. El consumidor lo usa para garantizar
     // idempotencia: si recibe el mismo evento dos veces, solo lo procesa una vez.
-    this.kafka.emit('RESERVE_SEATS', {
+    this.kafka.emit(TOPICS.RESERVE_SEATS, {
       eventId: order.id, // orderId como eventId: un order → un único RESERVE_SEATS
       orderId: order.id,
       eventName: order.eventName,
@@ -43,10 +45,9 @@ export class SagaOrchestrator implements OnModuleInit {
     return { orderId: order.id, status: order.status };
   }
 
-  async onSeatsReserved(payload: { orderId: string }) {
-    const { orderId } = payload;
+  async onSeatsReserved({ orderId }: SeatsReservedEvent) {
     this.logger.log(
-      `[SAGA] SEATS_RESERVED recibido para order ${orderId} → procesando pago`,
+      `[SAGA] ${TOPICS.SEATS_RESERVED} recibido para order ${orderId} → procesando pago`,
     );
 
     const paid = this.payment.processPayment();
@@ -71,13 +72,13 @@ export class SagaOrchestrator implements OnModuleInit {
     });
 
     this.logger.log(
-      `[SAGA] ❌ Pago fallido para order ${orderId} → emitiendo RELEASE_SEATS`,
+      `[SAGA] ❌ Pago fallido para order ${orderId} → emitiendo ${TOPICS.RELEASE_SEATS}`,
     );
 
-    // El eventId distingue este evento del RESERVE_SEATS del mismo orderId.
-    this.kafka.emit('RELEASE_SEATS', {
-      eventId: `${orderId}-release`,
+    const payload: ReleaseSeatsCommand = {
+      eventId: `${orderId}-release`, // distingue este evento del RESERVE_SEATS del mismo orderId
       orderId,
-    });
+    };
+    this.kafka.emit(TOPICS.RELEASE_SEATS, payload);
   }
 }

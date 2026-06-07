@@ -1,19 +1,14 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ClientKafka } from '@nestjs/microservices';
 import { Prisma } from '@prisma/client';
+import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
-
-interface ReserveSeatsPayload {
-  eventId: string;
-  orderId: string;
-  eventName: string;
-  seatCount: number;
-}
-
-interface ReleaseSeatsPayload {
-  eventId: string;
-  orderId: string;
-}
+import {
+  ReleaseSeatsCommand,
+  ReserveSeatsCommand,
+  SeatsReservedEvent,
+} from './events';
+import { NotEnoughSeatsException } from './exceptions/not-enough-seats.exception';
 
 @Injectable()
 export class SeatService implements OnModuleInit {
@@ -26,20 +21,9 @@ export class SeatService implements OnModuleInit {
 
   async onModuleInit() {
     await this.kafka.connect();
-    await this.seedSeatsIfEmpty();
   }
 
-  private async seedSeatsIfEmpty() {
-    const count = await this.prisma.seat.count();
-    if (count === 0) {
-      await this.prisma.seat.createMany({
-        data: Array.from({ length: 50 }, () => ({ eventName: 'Test Event' })),
-      });
-      this.logger.log('Seeded 50 seats for "Test Event"');
-    }
-  }
-
-  async reserveSeats(payload: ReserveSeatsPayload) {
+  async reserveSeats(payload: ReserveSeatsCommand) {
     const { eventId, orderId, eventName, seatCount } = payload;
 
     try {
@@ -55,7 +39,7 @@ export class SeatService implements OnModuleInit {
 
         if (available.length < seatCount) {
           // Lanzamos para revertir la transacción y no emitir SEATS_RESERVED
-          throw new Error(`NOT_ENOUGH_SEATS`);
+          throw new NotEnoughSeatsException(orderId);
         }
 
         await tx.seat.updateMany({
@@ -72,22 +56,22 @@ export class SeatService implements OnModuleInit {
         this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
         return;
       }
-      if (e.message === 'NOT_ENOUGH_SEATS') {
-        this.logger.warn(
-          `[INVENTORY] Asientos insuficientes para order ${orderId}`,
-        );
+      if (e instanceof NotEnoughSeatsException) {
+        this.logger.warn(`[INVENTORY] ${e.message}`);
         return;
       }
       throw e;
     }
 
     this.logger.log(
-      `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → emitiendo SEATS_RESERVED`,
+      `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → emitiendo ${TOPICS.SEATS_RESERVED}`,
     );
-    this.kafka.emit('SEATS_RESERVED', { orderId });
+
+    const event: SeatsReservedEvent = { orderId };
+    this.kafka.emit(TOPICS.SEATS_RESERVED, event);
   }
 
-  async releaseSeats(payload: ReleaseSeatsPayload) {
+  async releaseSeats(payload: ReleaseSeatsCommand) {
     const { eventId, orderId } = payload;
 
     try {
