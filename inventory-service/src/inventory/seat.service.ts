@@ -1,8 +1,10 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ClientKafka } from '@nestjs/microservices';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 interface ReserveSeatsPayload {
+  eventId: string;
   orderId: string;
   eventName: string;
   seatCount: number;
@@ -33,24 +35,46 @@ export class SeatService implements OnModuleInit {
   }
 
   async reserveSeats(payload: ReserveSeatsPayload) {
-    const { orderId, eventName, seatCount } = payload;
+    const { eventId, orderId, eventName, seatCount } = payload;
 
-    const available = await this.prisma.seat.findMany({
-      where: { eventName, reserved: false },
-      take: seatCount,
-    });
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // Intentamos insertar el eventId. Si ya existe (P2002), la transacción
+        // entera se revierte y el catch lo maneja → procesamiento idempotente.
+        await tx.processedEvent.create({ data: { eventId } });
 
-    if (available.length < seatCount) {
-      this.logger.warn(
-        `[INVENTORY] No hay suficientes asientos para order ${orderId}`,
-      );
-      return;
+        const available = await tx.seat.findMany({
+          where: { eventName, reserved: false },
+          take: seatCount,
+        });
+
+        if (available.length < seatCount) {
+          // Lanzamos para revertir la transacción y no emitir SEATS_RESERVED
+          throw new Error(`NOT_ENOUGH_SEATS`);
+        }
+
+        await tx.seat.updateMany({
+          where: { id: { in: available.map((s) => s.id) } },
+          data: { reserved: true, orderId },
+        });
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        // El evento ya fue procesado antes (eventId duplicado) → ignorar.
+        this.logger.warn(`[INVENTORY] Evento duplicado ignorado: ${eventId}`);
+        return;
+      }
+      if (e.message === 'NOT_ENOUGH_SEATS') {
+        this.logger.warn(
+          `[INVENTORY] Asientos insuficientes para order ${orderId}`,
+        );
+        return;
+      }
+      throw e;
     }
-
-    await this.prisma.seat.updateMany({
-      where: { id: { in: available.map((s) => s.id) } },
-      data: { reserved: true, orderId },
-    });
 
     this.logger.log(
       `[INVENTORY] ${seatCount} asientos reservados para order ${orderId} → emitiendo SEATS_RESERVED`,

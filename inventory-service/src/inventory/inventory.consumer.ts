@@ -8,7 +8,13 @@ export class InventoryConsumer {
 
   @EventPattern('RESERVE_SEATS')
   async handleReserveSeats(
-    @Payload() data: { orderId: string; eventName: string; seatCount: number },
+    @Payload()
+    data: {
+      eventId: string;
+      orderId: string;
+      eventName: string;
+      seatCount: number;
+    },
   ) {
     await this.seatService.reserveSeats(data);
   }

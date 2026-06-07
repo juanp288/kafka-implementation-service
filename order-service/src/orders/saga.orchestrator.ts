@@ -30,7 +30,11 @@ export class SagaOrchestrator implements OnModuleInit {
     this.logger.log(
       `[SAGA] Order ${order.id} created → emitiendo RESERVE_SEATS`,
     );
+
+    // El eventId lo asigna el productor. El consumidor lo usa para garantizar
+    // idempotencia: si recibe el mismo evento dos veces, solo lo procesa una vez.
     this.kafka.emit('RESERVE_SEATS', {
+      eventId: order.id, // orderId como eventId: un order → un único RESERVE_SEATS
       orderId: order.id,
       eventName: order.eventName,
       seatCount: order.seatCount,
