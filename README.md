@@ -1,4 +1,4 @@
-Perfecto. Alcance claro: 2 servicios, SAGA por orquestación, con foco en idempotencia y compensación. El pago lo simulamos dentro del `orders-service` (un método que falla al azar) para no agregar un tercer servicio. Eso te da el rollback real sin inflar el proyecto.
+Alcance claro: 2 servicios, SAGA por orquestación, con foco en idempotencia y compensación. El pago lo simulamos dentro del `orders-service` (un método que falla al azar) para no agregar un tercer servicio. Eso te da el rollback real sin inflar el proyecto.
 
 Te mapeo todo.
 
@@ -16,7 +16,7 @@ La operación de negocio es: comprar tickets. El orquestador la divide en pasos.
 
 ```
 ticket-saga/
-├── docker-compose.yml          # Kafka + Zookeeper + 2x Postgres
+├── docker-compose.yml          # Kafka + Zookeeper + Postgres Local x2 Schemas (s_orders, s_inventories)
 ├── orders-service/
 │   ├── prisma/schema.prisma
 │   └── src/
@@ -41,7 +41,6 @@ ticket-saga/
 Esto te levanta toda la infraestructura. Aprovechas tu Docker tal como pediste.
 
 ```yaml
-version: '3.8'
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -50,26 +49,19 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
-    depends_on: [zookeeper]
-    ports: ['9092:9092']
+    depends_on: zookeeper
+    ports: '9092:9092'
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
-  postgres-orders:
+  postgres-microservices:
     image: postgres:16
-    ports: ['5432:5432']
+    ports: '5434:5432'
     environment:
-      POSTGRES_DB: orders
-      POSTGRES_PASSWORD: postgres
-
-  postgres-inventory:
-    image: postgres:16
-    ports: ['5433:5432']
-    environment:
-      POSTGRES_DB: inventory
+      POSTGRES_DB: microservices
       POSTGRES_PASSWORD: postgres
 ```
 
@@ -104,17 +96,17 @@ model ProcessedEvent {
 }
 ```
 
-## El plan de fin de semana
+## El plan
 
 Te lo divido para que el tiempo alcance y aprendas cada concepto sin atragantarte.
 
-Sábado mañana: levantar `docker-compose`, crear los dos proyectos NestJS, configurar el `ClientKafka` en ambos y conectar Prisma a cada Postgres. La meta es que un servicio emita un evento de prueba y el otro lo reciba y lo imprima en consola. Si logras eso, lo demás es lógica de negocio.
+* Paso 1: levantar `docker-compose`, crear los dos proyectos NestJS, configurar el `ClientKafka` en ambos y conectar Prisma a cada Postgres Schema. La meta es que un servicio emita un evento de prueba y el otro lo reciba y lo imprima en consola. Si logras eso, lo demás es lógica de negocio.
 
-* Sábado tarde: el happy path completo. Endpoint `POST /orders`, el orquestador crea la orden, emite `RESERVE_SEATS`, el `inventory-service` reserva y responde, el orquestador procesa el pago (siempre éxito por ahora) y confirma.
+* Paso 2: el happy path completo. Endpoint `POST /orders`, el orquestador crea la orden, emite `RESERVE_SEATS`, el `inventory-service` reserva y responde, el orquestador procesa el pago (siempre éxito por ahora) y confirma.
 
-* Domingo mañana: idempotencia. Agrega la tabla `ProcessedEvent` y el patrón que vimos (insert del `eventId` + lógica en la misma transacción). Pruébalo enviando el mismo evento dos veces a mano y verifica que solo se procesa una vez.
+* Paso 3: idempotencia. Agrega la tabla `ProcessedEvent` y el patrón que vimos (insert del `eventId` + lógica en la misma transacción). Pruébalo enviando el mismo evento dos veces a mano y verifica que solo se procesa una vez.
 
-* Domingo tarde: compensación. Haz que `PaymentMock` falle el 50% de las veces (`Math.random()`), y cuando falle, el orquestador emite `RELEASE_SEATS`. Verifica que los asientos vuelven a quedar libres y la orden queda en `FAILED`.
+* Paso 4: compensación. Haz que `PaymentMock` falle el 50% de las veces (`Math.random()`), y cuando falle, el orquestador emite `RELEASE_SEATS`. Verifica que los asientos vuelven a quedar libres y la orden queda en `FAILED`.
 
 ## El detalle que más vas a aprender
 
