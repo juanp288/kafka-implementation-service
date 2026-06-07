@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { DlqModule } from '../dlq/dlq.module';
 import { OutboxModule } from '../outbox/outbox.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { OrdersConsumer } from './orders.consumer';
@@ -7,7 +8,7 @@ import { PaymentMock } from './payment.mock';
 import { SagaOrchestrator } from './saga.orchestrator';
 
 @Module({
-  imports: [PrismaModule, OutboxModule],
+  imports: [PrismaModule, OutboxModule, DlqModule],
   controllers: [OrdersController, OrdersConsumer],
   providers: [SagaOrchestrator, PaymentMock],
 })
