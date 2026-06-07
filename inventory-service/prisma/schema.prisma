@@ -18,3 +18,23 @@ model ProcessedEvent {
   eventId     String   @id
   processedAt DateTime @default(now())
 }
+
+model Outbox {
+  id          String    @id @default(uuid())
+  topic       String
+  payload     Json
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+// Mensajes que agotaron sus reintentos y fueron enviados a `<topic>.DLQ`.
+// Quedan aquí para inspección manual y posible reproceso.
+model DeadLetter {
+  id         String   @id @default(uuid())
+  topic      String
+  eventId    String?
+  payload    Json
+  error      String
+  retryCount Int
+  receivedAt DateTime @default(now())
+}

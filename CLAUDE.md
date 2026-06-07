@@ -46,6 +46,7 @@ Schema sync: `prisma db push` runs on container start (Dockerfile CMD). No migra
 |---|---|---|
 | `RESERVE_SEATS` | order → inventory | Command: reserve N seats |
 | `SEATS_RESERVED` | inventory → order | Confirmation |
+| `RESERVE_SEATS_REJECTED` | inventory → order | Business rejection (not enough seats) — order compensates immediately instead of waiting on the SAGA timeout |
 | `RELEASE_SEATS` | order → inventory | Compensation: undo reservation |
 
 All events carry an `eventId` assigned by the producer for idempotency.
@@ -62,7 +63,7 @@ Seats are reserved **before** charging. Releasing a seat is trivial (one UPDATE)
 
 `PENDING` → `CONFIRMED` | `FAILED`
 
-`sagaStep` tracks position: `RESERVING_SEATS` → `COMPLETED` (success) or `COMPENSATING` (failure, after emitting `RELEASE_SEATS`).
+`sagaStep` tracks position: `RESERVING_SEATS` → `COMPLETED` (success), `COMPENSATING` (payment failed or SAGA timed out, after emitting `RELEASE_SEATS`), or `CANCELLED` (rejected by inventory before any seat was reserved — `RESERVE_SEATS_REJECTED` received, no compensation needed).
 
 ## Key files
 

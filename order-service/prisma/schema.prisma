@@ -8,10 +8,34 @@ datasource db {
 }
 
 model Order {
-  id        String   @id @default(uuid())
-  eventName String
-  seatCount Int
-  status    String   @default("PENDING")
-  sagaStep  String?
+  id            String   @id @default(uuid())
+  eventName     String
+  seatCount     Int
+  status        String   @default("PENDING")
+  sagaStep      String?
+  // Viaja en cada evento de la SAGA (RESERVE_SEATS, SEATS_RESERVED,
+  // RESERVE_SEATS_REJECTED, RELEASE_SEATS) para poder filtrar logs de
+  // ambos servicios por un único ID — base para tracing tipo OpenTelemetry.
+  correlationId String
   createdAt DateTime @default(now())
+}
+
+model Outbox {
+  id          String    @id @default(uuid())
+  topic       String
+  payload     Json
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+// Mensajes que agotaron sus reintentos y fueron enviados a `<topic>.DLQ`.
+// Quedan aquí para inspección manual y posible reproceso.
+model DeadLetter {
+  id         String   @id @default(uuid())
+  topic      String
+  eventId    String?
+  payload    Json
+  error      String
+  retryCount Int
+  receivedAt DateTime @default(now())
 }

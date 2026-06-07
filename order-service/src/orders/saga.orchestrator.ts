@@ -1,53 +1,70 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ClientKafka } from '@nestjs/microservices';
+import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { TOPICS } from '../kafka/topics';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto } from './dto/create-order.dto';
-import { ReleaseSeatsCommand, SeatsReservedEvent } from './events';
+import {
+  ReleaseSeatsCommand,
+  SeatsReservationRejectedEvent,
+  SeatsReservedEvent,
+} from './events';
 import { PaymentMock } from './payment.mock';
 
 @Injectable()
-export class SagaOrchestrator implements OnModuleInit {
+export class SagaOrchestrator {
   private readonly logger = new Logger(SagaOrchestrator.name);
 
   constructor(
-    @Inject('KAFKA_CLIENT') private readonly kafka: ClientKafka,
     private readonly prisma: PrismaService,
     private readonly payment: PaymentMock,
   ) {}
 
-  async onModuleInit() {
-    await this.kafka.connect();
-  }
-
   async startSaga(dto: CreateOrderDto) {
-    const order = await this.prisma.order.create({
-      data: {
-        eventName: dto.eventName,
-        seatCount: dto.seatCount,
-        sagaStep: 'RESERVING_SEATS',
-      },
+    // Transacción atómica: la orden y el evento de Outbox se crean juntos.
+    // Si el proceso cae después de este punto, OutboxPublisher re-emitirá
+    // RESERVE_SEATS en el siguiente ciclo de polling.
+    // correlationId: identifica toda la SAGA de punta a punta. Se genera una
+    // sola vez aquí y viaja en cada evento (RESERVE_SEATS, SEATS_RESERVED,
+    // RESERVE_SEATS_REJECTED, RELEASE_SEATS) — permite filtrar los logs de
+    // ambos servicios por un único ID, la base de cualquier setup de tracing
+    // (OpenTelemetry propaga el trace context de la misma manera).
+    const correlationId = randomUUID();
+
+    const order = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          eventName: dto.eventName,
+          seatCount: dto.seatCount,
+          sagaStep: 'RESERVING_SEATS',
+          correlationId,
+        },
+      });
+
+      await tx.outbox.create({
+        data: {
+          topic: TOPICS.RESERVE_SEATS,
+          payload: {
+            eventId: created.id,
+            orderId: created.id,
+            correlationId,
+            eventName: created.eventName,
+            seatCount: created.seatCount,
+          },
+        },
+      });
+
+      return created;
     });
 
     this.logger.log(
-      `[SAGA] Order ${order.id} created → emitiendo ${TOPICS.RESERVE_SEATS}`,
+      `[SAGA][CID:${correlationId}] Order ${order.id} created → Outbox: ${TOPICS.RESERVE_SEATS}`,
     );
-
-    // El eventId lo asigna el productor. El consumidor lo usa para garantizar
-    // idempotencia: si recibe el mismo evento dos veces, solo lo procesa una vez.
-    this.kafka.emit(TOPICS.RESERVE_SEATS, {
-      eventId: order.id, // orderId como eventId: un order → un único RESERVE_SEATS
-      orderId: order.id,
-      eventName: order.eventName,
-      seatCount: order.seatCount,
-    });
-
     return { orderId: order.id, status: order.status };
   }
 
-  async onSeatsReserved({ orderId }: SeatsReservedEvent) {
+  async onSeatsReserved({ orderId, correlationId }: SeatsReservedEvent) {
     this.logger.log(
-      `[SAGA] ${TOPICS.SEATS_RESERVED} recibido para order ${orderId} → procesando pago`,
+      `[SAGA][CID:${correlationId}] ${TOPICS.SEATS_RESERVED} recibido para order ${orderId} → procesando pago`,
     );
 
     const paid = this.payment.processPayment();
@@ -57,28 +74,59 @@ export class SagaOrchestrator implements OnModuleInit {
         where: { id: orderId },
         data: { status: 'CONFIRMED', sagaStep: 'COMPLETED' },
       });
-      this.logger.log(`[SAGA] ✅ Order ${orderId} → CONFIRMED`);
+      this.logger.log(
+        `[SAGA][CID:${correlationId}] ✅ Order ${orderId} → CONFIRMED`,
+      );
       return;
     }
 
-    // Compensación: el pago falló, hay que deshacer la reserva de asientos.
-    // Primero marcamos la orden como FAILED y luego emitimos el comando de rollback.
-    // El orden importa: si el servicio cae entre estos dos pasos, la orden queda
-    // en FAILED pero los asientos reservados — un estado inconsistente aceptable
-    // porque RELEASE_SEATS puede re-emitirse manualmente o con un job de limpieza.
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: 'FAILED', sagaStep: 'COMPENSATING' },
+    // Compensación: el pago falló. La orden pasa a FAILED y el evento
+    // RELEASE_SEATS va al Outbox en la misma transacción — si el proceso
+    // cae entre los dos, el estado queda consistente.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: 'FAILED', sagaStep: 'COMPENSATING' },
+      });
+
+      const payload: ReleaseSeatsCommand = {
+        eventId: `${orderId}-release`,
+        orderId,
+        correlationId,
+      };
+      await tx.outbox.create({
+        data: { topic: TOPICS.RELEASE_SEATS, payload: { ...payload } },
+      });
     });
 
     this.logger.log(
-      `[SAGA] ❌ Pago fallido para order ${orderId} → emitiendo ${TOPICS.RELEASE_SEATS}`,
+      `[SAGA][CID:${correlationId}] ❌ Pago fallido para order ${orderId} → Outbox: ${TOPICS.RELEASE_SEATS}`,
     );
+  }
 
-    const payload: ReleaseSeatsCommand = {
-      eventId: `${orderId}-release`, // distingue este evento del RESERVE_SEATS del mismo orderId
-      orderId,
-    };
-    this.kafka.emit(TOPICS.RELEASE_SEATS, payload);
+  async onReservationRejected({
+    orderId,
+    correlationId,
+    reason,
+  }: SeatsReservationRejectedEvent) {
+    // updateMany con guarda de estado: evita carrera con SagaTimeoutService
+    // si ambos intentan transicionar la misma orden al mismo tiempo.
+    const { count } = await this.prisma.order.updateMany({
+      where: { id: orderId, status: 'PENDING', sagaStep: 'RESERVING_SEATS' },
+      data: { status: 'FAILED', sagaStep: 'CANCELLED' },
+    });
+
+    if (count === 0) {
+      this.logger.warn(
+        `[SAGA][CID:${correlationId}] ${TOPICS.RESERVE_SEATS_REJECTED} para order ${orderId} ignorado (la orden ya no está en RESERVING_SEATS)`,
+      );
+      return;
+    }
+
+    // Sin compensación: nunca se llegó a reservar nada, así que no hay
+    // nada que liberar — emitir RELEASE_SEATS aquí sería semánticamente vacío.
+    this.logger.warn(
+      `[SAGA][CID:${correlationId}] ❌ Reserva rechazada para order ${orderId} (${reason}) → Order CANCELLED (sin compensación)`,
+    );
   }
 }
